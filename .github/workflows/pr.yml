@@ -339,9 +339,9 @@ jobs:
         with:
           run: ./gradlew :common:assemble :app:assembleRelease :wear:assembleRelease :automotive:assembleRelease
 
+  # Keep unit tests independent so their PR check runs even when lint or other validation fails.
   unit_tests:
     name: "Unit Tests"
-    needs: [detekt, lint, lockfiles, ktlint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -351,6 +351,7 @@ jobs:
       - uses: $/.github/actions/setup-build-env
         with:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          cache-disabled: "true"
           mock-google-services: "true"
 
       - name: Run test
