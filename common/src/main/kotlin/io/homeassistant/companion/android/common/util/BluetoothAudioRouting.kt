@@ -15,18 +15,15 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
-/**
- * Routes a headset-initiated Assist recording through the Bluetooth microphone.
- * The connection must be ready before an 8 kHz AudioRecord is created.
- */
+/** Provides an opt-in Bluetooth microphone route for a headset-initiated Assist session. */
 interface BluetoothAudioRouting {
     suspend fun start(): Boolean
     fun stop()
 }
 
 /**
- * Opt-in audio routing for a Bluetooth voice command. Normal Assist sessions and background wake
- * word recording do not request a Bluetooth communication route.
+ * Only headset-initiated Assist sessions use this router. Normal Assist and background wake-word
+ * sessions retain their existing microphone behavior. Waits for the route before recording starts.
  */
 class AndroidBluetoothAudioRouting(
     private val context: Context,
@@ -37,41 +34,49 @@ class AndroidBluetoothAudioRouting(
     private var ownsRoute = false
 
     @SuppressLint("MissingPermission", "NewApi")
-    override suspend fun start(): Boolean {
-        try {
+    override suspend fun start(): Boolean = try {
         if (sdkInt >= Build.VERSION_CODES.S) {
-            val headset = audioManager.availableCommunicationDevices.firstOrNull {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-            } ?: return false
-
-            // Do not clear a route selected by another application on cleanup.
-            if (audioManager.communicationDevice?.id == headset.id) return true
-
-            val accepted = try {
-                audioManager.setCommunicationDevice(headset)
-            } catch (e: SecurityException) {
-                Timber.w(e, "Bluetooth audio routing permission denied")
-                false
-            }
-            if (!accepted) return false
-
-            ownsRoute = true
-            var ready = false
-            try {
-                ready = withTimeoutOrNull(3000) {
-                    while (audioManager.communicationDevice?.id != headset.id) {
-                        delay(50)
-                    }
-                    true
-                } == true
-                if (!ready) Timber.w("Bluetooth communication device did not become ready")
-                return ready
-            } finally {
-                if (!ready) stop()
-            }
+            startCommunicationDevice()
+        } else {
+            startLegacySco()
         }
+    } catch (e: SecurityException) {
+        Timber.w(e, "Bluetooth audio permission denied; using phone microphone")
+        stop()
+        false
+    }
 
-        // Legacy SCO is asynchronous. Observe the connected broadcast before starting it.
+    /** Android 12+: select an actual connected SCO communication device, not device capability. */
+    @SuppressLint("MissingPermission", "NewApi")
+    private suspend fun startCommunicationDevice(): Boolean {
+        val headset = audioManager.availableCommunicationDevices.firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        } ?: return false
+
+        // A pre-existing route belongs to its owner; do not clear it on cleanup.
+        if (audioManager.communicationDevice?.id == headset.id) return true
+        if (!audioManager.setCommunicationDevice(headset)) return false
+        ownsRoute = true
+
+        var ready = false
+        try {
+            ready = withTimeoutOrNull(3000) {
+                while (audioManager.communicationDevice?.id != headset.id) {
+                    delay(50)
+                }
+                true
+            } == true
+            if (!ready) Timber.w("Bluetooth communication device did not become ready")
+            return ready
+        } finally {
+            // Also releases the route if the coroutine was cancelled during setup.
+            if (!ready) stop()
+        }
+    }
+
+    /** Android 11 and earlier: start SCO and wait for the actual connected broadcast. */
+    @SuppressLint("MissingPermission")
+    private suspend fun startLegacySco(): Boolean {
         if (!audioManager.isBluetoothScoAvailableOffCall ||
             audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).none {
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
@@ -84,38 +89,36 @@ class AndroidBluetoothAudioRouting(
         try {
             connected = withTimeoutOrNull(3000) {
                 callbackFlow {
-                val receiver = object : BroadcastReceiver() {
-                    override fun onReceive(context: Context, intent: Intent) {
-                        when (intent.getIntExtra(
-                            AudioManager.EXTRA_SCO_AUDIO_STATE,
-                            AudioManager.SCO_AUDIO_STATE_ERROR,
-                        )) {
-                            AudioManager.SCO_AUDIO_STATE_CONNECTED -> trySend(true)
-                            AudioManager.SCO_AUDIO_STATE_ERROR -> trySend(false)
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: Context, intent: Intent) {
+                            when (
+                                intent.getIntExtra(
+                                    AudioManager.EXTRA_SCO_AUDIO_STATE,
+                                    AudioManager.SCO_AUDIO_STATE_ERROR,
+                                )
+                            ) {
+                                AudioManager.SCO_AUDIO_STATE_CONNECTED -> trySend(true)
+                                AudioManager.SCO_AUDIO_STATE_ERROR -> trySend(false)
+                            }
                         }
                     }
-                }
-                context.registerReceiver(receiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
-                try {
-                    @Suppress("DEPRECATION")
-                    audioManager.startBluetoothSco()
-                    ownsRoute = true
-                } catch (e: SecurityException) {
-                    Timber.w(e, "Unable to start Bluetooth SCO")
-                    trySend(false)
-                }
-                awaitClose { context.unregisterReceiver(receiver) }
+                    context.registerReceiver(receiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+                    try {
+                        @Suppress("DEPRECATION")
+                        audioManager.startBluetoothSco()
+                        ownsRoute = true
+                    } catch (e: SecurityException) {
+                        Timber.w(e, "Unable to start Bluetooth SCO")
+                        trySend(false)
+                    }
+                    awaitClose { context.unregisterReceiver(receiver) }
                 }.first()
             } == true
+
             if (!connected) Timber.w("Bluetooth SCO was not established, using phone microphone")
             return connected
         } finally {
             if (!connected) stop()
-        }
-        } catch (e: SecurityException) {
-            Timber.w(e, "Bluetooth audio permission denied; using phone microphone")
-            stop()
-            return false
         }
     }
 
