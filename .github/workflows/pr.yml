@@ -325,14 +325,14 @@ jobs:
           -keyalg RSA \
           -keysize 2048 \
           -validity 10000 \
-          -keystore /home/runner/work/android/android/ci_dummy_keystore.keystore \
+          -keystore "$RUNNER_TEMP/ci_dummy_keystore.keystore" \
           -dname "CN=Android CI dummy, O=Android, C=FR" \
           -storepass android \
           -keypass android
       - name: Build Release
         uses: $/.github/actions/monitor-resources
         env:
-          KEYSTORE_PATH: /home/runner/work/android/android/ci_dummy_keystore.keystore
+          KEYSTORE_PATH: ${{ runner.temp }}/ci_dummy_keystore.keystore
           KEYSTORE_ALIAS: androiddebugkey
           KEYSTORE_ALIAS_PASSWORD: android
           KEYSTORE_PASSWORD: android
