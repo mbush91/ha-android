@@ -42,7 +42,11 @@ class AssistAudioStrategyFactory @Inject constructor(
      *   the matching wake word model from available models
      * @return The configured [AssistAudioStrategy]
      */
-    fun create(context: Context, wakeWordPhrase: String?, bluetoothVoiceCommand: Boolean = false): AssistAudioStrategy = if (wakeWordPhrase != null) {
+    fun create(
+        context: Context,
+        wakeWordPhrase: String?,
+        bluetoothVoiceCommand: Boolean = false,
+    ): AssistAudioStrategy = if (wakeWordPhrase != null) {
         WakeWordAssistAudioStrategy(
             voiceAudioRecorder = voiceAudioRecorder,
             wakeWordListenerFactory = wakeWordListenerFactory,
