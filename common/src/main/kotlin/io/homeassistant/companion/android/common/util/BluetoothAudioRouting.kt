@@ -28,7 +28,7 @@ interface BluetoothAudioRouting {
 class AndroidBluetoothAudioRouting(
     private val context: Context,
     private val audioManager: AudioManager,
-    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    private val useModernRouting: Boolean = SdkVersion.isAtLeast(Build.VERSION_CODES.S),
 ) : BluetoothAudioRouting {
 
     private companion object {
@@ -40,7 +40,7 @@ class AndroidBluetoothAudioRouting(
 
     @SuppressLint("MissingPermission", "NewApi")
     override suspend fun start(): Boolean = try {
-        if (sdkInt >= Build.VERSION_CODES.S) {
+        if (useModernRouting) {
             startCommunicationDevice()
         } else {
             startLegacySco()
@@ -137,7 +137,7 @@ class AndroidBluetoothAudioRouting(
         if (!ownsRoute) return
         ownsRoute = false
         try {
-            if (sdkInt >= Build.VERSION_CODES.S) {
+            if (useModernRouting) {
                 audioManager.clearCommunicationDevice()
             } else {
                 @Suppress("DEPRECATION")
