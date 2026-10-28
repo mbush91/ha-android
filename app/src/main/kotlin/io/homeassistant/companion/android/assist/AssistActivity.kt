@@ -43,7 +43,13 @@ class AssistActivity : BaseActivity() {
     private val viewModel: AssistViewModel by viewModels(
         extrasProducer = {
             defaultViewModelCreationExtras.withCreationCallback<AssistViewModel.Factory> { factory ->
-                factory.create(audioStrategyFactory.create(applicationContext, wakeWordPhrase))
+                factory.create(
+                    audioStrategyFactory.create(
+                        applicationContext,
+                        wakeWordPhrase,
+                        bluetoothVoiceCommand = intent.action == Intent.ACTION_VOICE_COMMAND,
+                    ),
+                )
             }
         },
     )
