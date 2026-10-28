@@ -31,6 +31,11 @@ class AndroidBluetoothAudioRouting(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
 ) : BluetoothAudioRouting {
 
+    private companion object {
+        const val CONNECTION_TIMEOUT_MS = 3_000L
+        const val ROUTE_POLL_INTERVAL_MS = 50L
+    }
+
     private var ownsRoute = false
 
     @SuppressLint("MissingPermission", "NewApi")
@@ -51,26 +56,31 @@ class AndroidBluetoothAudioRouting(
     private suspend fun startCommunicationDevice(): Boolean {
         val headset = audioManager.availableCommunicationDevices.firstOrNull {
             it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-        } ?: return false
+        }
 
-        // A pre-existing route belongs to its owner; do not clear it on cleanup.
-        if (audioManager.communicationDevice?.id == headset.id) return true
-        if (!audioManager.setCommunicationDevice(headset)) return false
-        ownsRoute = true
-
-        var ready = false
-        try {
-            ready = withTimeoutOrNull(3000) {
-                while (audioManager.communicationDevice?.id != headset.id) {
-                    delay(50)
-                }
-                true
-            } == true
-            if (!ready) Timber.w("Bluetooth communication device did not become ready")
-            return ready
-        } finally {
-            // Also releases the route if the coroutine was cancelled during setup.
-            if (!ready) stop()
+        // Only release a communication route that this instance successfully selected.
+        return if (headset == null) {
+            false
+        } else if (audioManager.communicationDevice?.id == headset.id) {
+            true
+        } else if (!audioManager.setCommunicationDevice(headset)) {
+            false
+        } else {
+            ownsRoute = true
+            var ready = false
+            try {
+                ready = withTimeoutOrNull(CONNECTION_TIMEOUT_MS) {
+                    while (audioManager.communicationDevice?.id != headset.id) {
+                        delay(ROUTE_POLL_INTERVAL_MS)
+                    }
+                    true
+                } == true
+                if (!ready) Timber.w("Bluetooth communication device did not become ready")
+                ready
+            } finally {
+                // Also releases the route if the coroutine was cancelled during setup.
+                if (!ready) stop()
+            }
         }
     }
 
@@ -87,7 +97,7 @@ class AndroidBluetoothAudioRouting(
 
         var connected = false
         try {
-            connected = withTimeoutOrNull(3000) {
+            connected = withTimeoutOrNull(CONNECTION_TIMEOUT_MS) {
                 callbackFlow {
                     val receiver = object : BroadcastReceiver() {
                         override fun onReceive(context: Context, intent: Intent) {
