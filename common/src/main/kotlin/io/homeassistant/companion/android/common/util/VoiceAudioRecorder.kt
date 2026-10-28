@@ -84,6 +84,7 @@ class VoiceAudioRecorder(
     private val recorderDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val sharingScope: CoroutineScope = CoroutineScope(Job() + recorderDispatcher),
     private val bluetoothAudioRouting: BluetoothAudioRouting? = null,
+    private val bluetoothAudioRecordFactory: () -> AudioRecord = ::createBluetoothAudioRecord,
 ) {
     private val mutex = Mutex()
     private var sharedFlow: Flow<ShortArray>? = null
@@ -109,7 +110,7 @@ class VoiceAudioRecorder(
             var bluetoothConnected = bluetoothAudioRouting?.start() == true
             try {
                 val recorder = if (bluetoothConnected) {
-                    val bluetoothRecorder = runCatching { createBluetoothAudioRecord() }
+                    val bluetoothRecorder = runCatching { bluetoothAudioRecordFactory() }
                         .onFailure { Timber.w(it, "Unable to create Bluetooth voice recorder") }
                         .getOrNull()
                     if (bluetoothRecorder?.state == AudioRecord.STATE_INITIALIZED) {
