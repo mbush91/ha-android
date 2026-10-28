@@ -1,0 +1,133 @@
+name: Signed Android APK
+
+on: # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Do not cancel a build while it is publishing its release.
+concurrency:
+  group: signed-android-apk-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  signed-apk:
+    name: Build, sign, and release full APK
+    if: github.repository == 'mbush91/ha-android' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to publish a GitHub Release and its APK asset.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Project versioning and versionCode depend on Git history.
+          persist-credentials: false
+
+      - name: Check signing secrets
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+          KEYSTORE_ALIAS_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_B64" || -z "$KEYSTORE_PASSWORD" ||
+                -z "$KEYSTORE_ALIAS" || -z "$KEYSTORE_ALIAS_PASSWORD" ]]; then
+            echo "::error::APK signing secrets are missing. See .github/signed-apk-releases.md."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/setup-build-env
+        with:
+          mock-google-services: "true"
+          cache-disabled: "true" # Fork builds do not require an encrypted Gradle cache.
+          cache-encryption-key: ""
+
+      - name: Prepare signing keystore and Firebase configuration
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES: ${{ secrets.GOOGLESERVICES }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > app/release_keystore.keystore
+          chmod 600 app/release_keystore.keystore
+          test -s app/release_keystore.keystore
+
+          # setup-build-env creates mock configs; use real Firebase config if supplied.
+          if [[ -n "$GOOGLE_SERVICES" ]]; then
+            printf '%s' "$GOOGLE_SERVICES" > app/google-services.json
+          else
+            echo "::warning::GOOGLESERVICES not configured. This build uses mock Firebase settings; push notifications will not work."
+          fi
+
+      - name: Calculate version code
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same six-per-commit spacing as the upstream create-release-number action.
+          version_code=$(( $(git rev-list --count HEAD) * 6 ))
+          echo "version-code=$version_code" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed full-release APK
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+          KEYSTORE_ALIAS_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+          VERSION_CODE: ${{ steps.version.outputs.version-code }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: ./gradlew :app:assembleFullRelease --no-daemon --max-workers=2
+
+      - name: Verify signature and stage APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/full/release/app-full-release.apk"
+          test -s "$apk"
+
+          apk_signer="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner -type f | sort -V | tail -n 1)"
+          if [[ -z "$apk_signer" ]]; then
+            echo "::error::Android apksigner was not found."
+            exit 1
+          fi
+          "$apk_signer" verify --verbose "$apk"
+
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          mkdir -p dist
+          cp "$apk" "dist/home-assistant-full-$short_sha.apk"
+
+      - name: Publish GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          tag="main-$short_sha"
+          asset="dist/home-assistant-full-$short_sha.apk"
+
+          # A rerun must not overwrite a release that has already been published.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" == "false" ]]; then
+              echo "Release $tag is already published; leaving it unchanged."
+              exit 0
+            fi
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "Main build $short_sha" \
+              --notes "Signed Home Assistant full-release APK built from commit $GITHUB_SHA." \
+              --draft \
+              --prerelease
+          fi
+
+          # Upload to a draft first; no incomplete release is publicly published.
+          gh release upload "$tag" "$asset" --clobber
+          gh release edit "$tag" --draft=false
