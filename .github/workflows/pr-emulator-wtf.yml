@@ -48,7 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: ui-test
     needs: [check_inputs]
-    if: needs.check_inputs.outputs.available == 'true'
+    # A fork has no emulator.wtf OIDC configuration until it is explicitly set up.
+    # Skip the optional cloud test instead of publishing a misleading red PR check.
+    # To enable, set the repository Actions variable EMULATOR_WTF_OIDC_CONFIGURATION_ID.
+    if: >-
+      needs.check_inputs.outputs.available == 'true' &&
+      vars.EMULATOR_WTF_OIDC_CONFIGURATION_ID != ''
     permissions:
       id-token: write  # Needed for OIDC authentication
       actions: read  # Needed for retrieving artifacts
