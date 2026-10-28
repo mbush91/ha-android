@@ -36,8 +36,9 @@ class AndroidBluetoothAudioRouting(
 
     private var ownsRoute = false
 
-    @SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission", "NewApi")
     override suspend fun start(): Boolean {
+        try {
         if (sdkInt >= Build.VERSION_CODES.S) {
             val headset = audioManager.availableCommunicationDevices.firstOrNull {
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
@@ -55,17 +56,19 @@ class AndroidBluetoothAudioRouting(
             if (!accepted) return false
 
             ownsRoute = true
-            val connected = withTimeoutOrNull(3000) {
-                while (audioManager.communicationDevice?.id != headset.id) {
-                    delay(50)
-                }
-                true
-            } == true
-            if (!connected) {
-                Timber.w("Bluetooth communication device did not become ready")
-                stop()
+            var ready = false
+            try {
+                ready = withTimeoutOrNull(3000) {
+                    while (audioManager.communicationDevice?.id != headset.id) {
+                        delay(50)
+                    }
+                    true
+                } == true
+                if (!ready) Timber.w("Bluetooth communication device did not become ready")
+                return ready
+            } finally {
+                if (!ready) stop()
             }
-            return connected
         }
 
         // Legacy SCO is asynchronous. Observe the connected broadcast before starting it.
@@ -77,8 +80,10 @@ class AndroidBluetoothAudioRouting(
             return false
         }
 
-        val connected = withTimeoutOrNull(3000) {
-            callbackFlow {
+        var connected = false
+        try {
+            connected = withTimeoutOrNull(3000) {
+                callbackFlow {
                 val receiver = object : BroadcastReceiver() {
                     override fun onReceive(context: Context, intent: Intent) {
                         when (intent.getIntExtra(
@@ -100,17 +105,21 @@ class AndroidBluetoothAudioRouting(
                     trySend(false)
                 }
                 awaitClose { context.unregisterReceiver(receiver) }
-            }.first()
-        } == true
-
-        if (!connected) {
-            Timber.w("Bluetooth SCO was not established, using phone microphone")
-            stop()
+                }.first()
+            } == true
+            if (!connected) Timber.w("Bluetooth SCO was not established, using phone microphone")
+            return connected
+        } finally {
+            if (!connected) stop()
         }
-        return connected
+        } catch (e: SecurityException) {
+            Timber.w(e, "Bluetooth audio permission denied; using phone microphone")
+            stop()
+            return false
+        }
     }
 
-    @SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission", "NewApi")
     override fun stop() {
         if (!ownsRoute) return
         ownsRoute = false
@@ -121,7 +130,7 @@ class AndroidBluetoothAudioRouting(
                 @Suppress("DEPRECATION")
                 audioManager.stopBluetoothSco()
             }
-        } catch (e: SecurityException) {
+        } catch (e: RuntimeException) {
             Timber.w(e, "Unable to release Bluetooth audio route")
         }
     }
