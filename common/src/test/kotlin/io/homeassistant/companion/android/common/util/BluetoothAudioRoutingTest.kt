@@ -25,7 +25,7 @@ class BluetoothAudioRoutingTest {
             every { communicationDevice } returnsMany listOf(null, headset)
             every { setCommunicationDevice(headset) } returns true
         }
-        val routing = AndroidBluetoothAudioRouting(context, manager, sdkInt = 31)
+        val routing = AndroidBluetoothAudioRouting(context, manager, useModernRouting = true)
 
         assertTrue(routing.start())
         routing.stop()
@@ -43,7 +43,7 @@ class BluetoothAudioRoutingTest {
         val manager = mockk<AudioManager>(relaxed = true) {
             every { availableCommunicationDevices } returns listOf(builtIn)
         }
-        val routing = AndroidBluetoothAudioRouting(context, manager, sdkInt = 31)
+        val routing = AndroidBluetoothAudioRouting(context, manager, useModernRouting = true)
 
         assertFalse(routing.start())
         routing.stop()
@@ -63,7 +63,7 @@ class BluetoothAudioRoutingTest {
             every { communicationDevice } returns null
             every { setCommunicationDevice(headset) } returns false
         }
-        val routing = AndroidBluetoothAudioRouting(mockk(), manager, sdkInt = 31)
+        val routing = AndroidBluetoothAudioRouting(mockk(), manager, useModernRouting = true)
 
         assertFalse(routing.start())
         routing.stop()
@@ -76,7 +76,7 @@ class BluetoothAudioRoutingTest {
         val manager = mockk<AudioManager>(relaxed = true) {
             every { availableCommunicationDevices } throws SecurityException("permission denied")
         }
-        val routing = AndroidBluetoothAudioRouting(mockk(), manager, sdkInt = 31)
+        val routing = AndroidBluetoothAudioRouting(mockk(), manager, useModernRouting = true)
 
         assertFalse(routing.start())
         verify(exactly = 0) { manager.clearCommunicationDevice() }
