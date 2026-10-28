@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.channelFlow
@@ -131,46 +132,7 @@ class VoiceAudioRecorder(
                     return@channelFlow
                 }
 
-                val actualSampleRate = recorder.sampleRate
-                val chunkSize = actualSampleRate * READ_CHUNK_DURATION_MS / 1000
-
-                if (actualSampleRate != VOICE_SAMPLE_RATE) {
-                    Timber.d("Recording at ${actualSampleRate}Hz, resampling to ${VOICE_SAMPLE_RATE}Hz")
-                }
-
-                try {
-                    recorder.startRecording()
-                    val buffer = ShortArray(chunkSize)
-
-                    while (isActive) {
-                        val readResult = recorder.read(buffer, 0, chunkSize)
-                        when {
-                            readResult > 0 -> {
-                                val chunk = buffer.copyOf(readResult)
-                                val output = when {
-                                    actualSampleRate > VOICE_SAMPLE_RATE ->
-                                        downsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
-                                    actualSampleRate < VOICE_SAMPLE_RATE ->
-                                        upsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
-                                    else -> chunk
-                                }
-                                send(output)
-                            }
-
-                            readResult < 0 -> {
-                                Timber.e("AudioRecord read error: $readResult")
-                                break
-                            }
-                        }
-                    }
-                } finally {
-                    try {
-                        recorder.stop()
-                    } catch (e: IllegalStateException) {
-                        Timber.e(e, "Error stopping AudioRecord")
-                    }
-                    recorder.release()
-                }
+                recordAudio(recorder)
             } finally {
                 if (bluetoothConnected) bluetoothAudioRouting?.stop()
             }
@@ -182,6 +144,51 @@ class VoiceAudioRecorder(
             replay = 0,
         )
     }
+
+    /** Read and convert microphone samples while ensuring the AudioRecord is always released. */
+    private suspend fun ProducerScope<ShortArray>.recordAudio(recorder: AudioRecord) {
+        val actualSampleRate = recorder.sampleRate
+        val chunkSize = actualSampleRate * READ_CHUNK_DURATION_MS / 1000
+
+        if (actualSampleRate != VOICE_SAMPLE_RATE) {
+            Timber.d("Recording at ${actualSampleRate}Hz, resampling to ${VOICE_SAMPLE_RATE}Hz")
+        }
+
+        try {
+            recorder.startRecording()
+            val buffer = ShortArray(chunkSize)
+
+            while (isActive) {
+                val readResult = recorder.read(buffer, 0, chunkSize)
+                when {
+                    readResult > 0 -> {
+                        val chunk = buffer.copyOf(readResult)
+                        val output = when {
+                            actualSampleRate > VOICE_SAMPLE_RATE ->
+                                downsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
+                            actualSampleRate < VOICE_SAMPLE_RATE ->
+                                upsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
+                            else -> chunk
+                        }
+                        send(output)
+                    }
+
+                    readResult < 0 -> {
+                        Timber.e("AudioRecord read error: $readResult")
+                        break
+                    }
+                }
+            }
+        } finally {
+            try {
+                recorder.stop()
+            } catch (e: IllegalStateException) {
+                Timber.e(e, "Error stopping AudioRecord")
+            }
+            recorder.release()
+        }
+    }
+
 }
 
 /**
@@ -219,11 +226,7 @@ private fun createBluetoothAudioRecord(): AudioRecord = createAudioRecord(
 )
 
 @SuppressLint("MissingPermission")
-private fun createAudioRecord(
-    sampleRate: Int,
-    chunkSize: Int,
-    audioSource: Int = VOICE_AUDIO_SOURCE,
-): AudioRecord {
+private fun createAudioRecord(sampleRate: Int, chunkSize: Int, audioSource: Int = VOICE_AUDIO_SOURCE): AudioRecord {
     val minBuffer = AudioRecord.getMinBufferSize(sampleRate, VOICE_CHANNEL_CONFIG, VOICE_AUDIO_FORMAT)
     val adjustedBufferSize = maxOf(minBuffer, chunkSize * 4)
     return AudioRecord(
