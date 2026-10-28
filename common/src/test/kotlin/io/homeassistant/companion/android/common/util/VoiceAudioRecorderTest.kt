@@ -2,6 +2,8 @@ package io.homeassistant.companion.android.common.util
 
 import android.media.AudioRecord
 import app.cash.turbine.turbineScope
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -354,6 +356,93 @@ class VoiceAudioRecorderTest {
 
                 turbine.cancelAndConsumeRemainingEvents()
             }
+        }
+    }
+
+    @Nested
+    inner class `Bluetooth recording` {
+
+        @Test
+        fun `Given Bluetooth route connected When recording Then capture at 8kHz and emit 16kHz chunks`() = runTest {
+            val routing = mockk<BluetoothAudioRouting>(relaxed = true)
+            coEvery { routing.start() } returns true
+            val released = CompletableDeferred<Unit>()
+            val bluetoothRecorder = mockk<AudioRecord>(relaxed = true) {
+                every { state } returns AudioRecord.STATE_INITIALIZED
+                every { sampleRate } returns 8000
+                every { read(any<ShortArray>(), eq(0), any()) } answers {
+                    Thread.sleep(1)
+                    val buffer = firstArg<ShortArray>()
+                    ShortArray(80) { 1234 }.copyInto(buffer)
+                    80
+                }
+                every { release() } answers { released.complete(Unit) }
+            }
+            val voiceAudioRecorder = VoiceAudioRecorder(
+                audioRecordFactory = { error("The phone microphone must not be used") },
+                bluetoothAudioRouting = routing,
+                bluetoothAudioRecordFactory = { bluetoothRecorder },
+            )
+
+            turbineScope {
+                val turbine = voiceAudioRecorder.audioData().testIn(this)
+                val samples = turbine.awaitItem()
+                assertEquals(160, samples.size)
+                samples.forEach { assertEquals(1234.toShort(), it) }
+                turbine.cancelAndConsumeRemainingEvents()
+            }
+            released.await()
+            coVerify(exactly = 1) { routing.start() }
+            verify(exactly = 1) { bluetoothRecorder.stop() }
+            verify(exactly = 1) { routing.stop() }
+        }
+
+        @Test
+        fun `Given no Bluetooth route When recording Then use normal microphone without changing route`() = runTest {
+            val routing = mockk<BluetoothAudioRouting>(relaxed = true)
+            coEvery { routing.start() } returns false
+            val released = CompletableDeferred<Unit>()
+            val phoneRecorder = mockk<AudioRecord>(relaxed = true) {
+                every { state } returns AudioRecord.STATE_INITIALIZED
+                every { sampleRate } returns VOICE_SAMPLE_RATE
+                every { read(any<ShortArray>(), eq(0), any()) } answers {
+                    Thread.sleep(1)
+                    val buffer = firstArg<ShortArray>()
+                    ShortArray(160) { 42 }.copyInto(buffer)
+                    160
+                }
+                every { release() } answers { released.complete(Unit) }
+            }
+            val voiceAudioRecorder = VoiceAudioRecorder(
+                audioRecordFactory = { phoneRecorder },
+                bluetoothAudioRouting = routing,
+                bluetoothAudioRecordFactory = { error("No Bluetooth connection should be opened") },
+            )
+
+            turbineScope {
+                val turbine = voiceAudioRecorder.audioData().testIn(this)
+                assertEquals(160, turbine.awaitItem().size)
+                turbine.cancelAndConsumeRemainingEvents()
+            }
+            released.await()
+            coVerify(exactly = 1) { routing.start() }
+            verify(exactly = 0) { routing.stop() }
+        }
+
+        @Test
+        fun `Given 8kHz samples When upsampled Then double samples and interpolate`() {
+            assertArrayEquals(
+                shortArrayOf(100, 150, 200, 200),
+                upsample(shortArrayOf(100, 200), fromRate = 8000, toRate = 16000),
+            )
+        }
+
+        @Test
+        fun `Given empty Bluetooth audio When upsampled Then remain empty`() {
+            assertArrayEquals(
+                shortArrayOf(),
+                upsample(shortArrayOf(), fromRate = 8000, toRate = 16000),
+            )
         }
     }
 
