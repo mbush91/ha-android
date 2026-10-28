@@ -6,6 +6,7 @@ import io.homeassistant.companion.android.assist.service.AssistVoiceInteractionS
 import io.homeassistant.companion.android.assist.wakeword.WakeWordListenerFactory
 import io.homeassistant.companion.android.common.assist.AssistAudioStrategy
 import io.homeassistant.companion.android.common.assist.DefaultAssistAudioStrategy
+import io.homeassistant.companion.android.common.util.AndroidBluetoothAudioRouting
 import io.homeassistant.companion.android.common.util.VoiceAudioRecorder
 import io.homeassistant.companion.android.settings.assist.AssistConfigManager
 import javax.inject.Inject
@@ -34,12 +35,18 @@ class AssistAudioStrategyFactory @Inject constructor(
      *
      * @param context Used to obtain the system [android.media.AudioManager] and to resume the
      *   background wake word listener when the strategy stops
+     * @param bluetoothVoiceCommand Whether Assist was launched by a Bluetooth voice-command action.
+     *   Only those sessions explicitly request Bluetooth microphone routing.
      * @param wakeWordPhrase Wake word phrase from an external source (e.g. Intent extra). When
      *   provided, a [WakeWordAssistAudioStrategy] is created and the phrase is used to resolve
      *   the matching wake word model from available models
      * @return The configured [AssistAudioStrategy]
      */
-    fun create(context: Context, wakeWordPhrase: String?): AssistAudioStrategy = if (wakeWordPhrase != null) {
+    fun create(
+        context: Context,
+        wakeWordPhrase: String?,
+        bluetoothVoiceCommand: Boolean = false,
+    ): AssistAudioStrategy = if (wakeWordPhrase != null) {
         WakeWordAssistAudioStrategy(
             voiceAudioRecorder = voiceAudioRecorder,
             wakeWordListenerFactory = wakeWordListenerFactory,
@@ -51,9 +58,16 @@ class AssistAudioStrategyFactory @Inject constructor(
             },
         )
     } else {
+        val audioManager = context.getSystemService<android.media.AudioManager>()
         DefaultAssistAudioStrategy(
-            voiceAudioRecorder = voiceAudioRecorder,
-            audioManager = context.getSystemService(),
+            voiceAudioRecorder = if (bluetoothVoiceCommand && audioManager != null) {
+                VoiceAudioRecorder(
+                    bluetoothAudioRouting = AndroidBluetoothAudioRouting(context.applicationContext, audioManager),
+                )
+            } else {
+                voiceAudioRecorder
+            },
+            audioManager = audioManager,
         )
     }
 }
