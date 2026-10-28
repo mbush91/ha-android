@@ -164,9 +164,7 @@ class VoiceAudioRecorder(
                     }
                 } finally {
                     try {
-                        if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                            recorder.stop()
-                        }
+                        recorder.stop()
                     } catch (e: IllegalStateException) {
                         Timber.e(e, "Error stopping AudioRecord")
                     }
