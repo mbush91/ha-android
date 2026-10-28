@@ -33,6 +33,9 @@ const val VOICE_SAMPLE_RATE = 16000
  */
 private const val FALLBACK_SAMPLE_RATE = 44100
 
+/** Bluetooth SCO microphone input is 8 kHz; output must still be 16 kHz for Assist. */
+private const val BLUETOOTH_SAMPLE_RATE = 8000
+
 // Only format "[g]uaranteed to be supported by devices"
 private const val VOICE_AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 
@@ -80,6 +83,7 @@ class VoiceAudioRecorder(
     private val audioRecordFactory: () -> AudioRecord = ::createVoiceAudioRecord,
     private val recorderDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val sharingScope: CoroutineScope = CoroutineScope(Job() + recorderDispatcher),
+    private val bluetoothAudioRouting: BluetoothAudioRouting? = null,
 ) {
     private val mutex = Mutex()
     private var sharedFlow: Flow<ShortArray>? = null
@@ -102,53 +106,74 @@ class VoiceAudioRecorder(
 
     private fun createSharedFlow(): Flow<ShortArray> {
         val upstream = channelFlow {
-            val recorder = audioRecordFactory()
-
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                recorder.release()
-                Timber.e("AudioRecord failed to initialize")
-                return@channelFlow
-            }
-
-            val actualSampleRate = recorder.sampleRate
-            val needsDownsampling = actualSampleRate != VOICE_SAMPLE_RATE
-            val chunkSize = if (needsDownsampling) FALLBACK_READ_CHUNK_SIZE else READ_CHUNK_SIZE
-
-            if (needsDownsampling) {
-                Timber.d("Recording at ${actualSampleRate}Hz, downsampling to ${VOICE_SAMPLE_RATE}Hz")
-            }
-
-            recorder.startRecording()
-
-            val buffer = ShortArray(chunkSize)
-
+            var bluetoothConnected = bluetoothAudioRouting?.start() == true
             try {
-                while (isActive) {
-                    val readResult = recorder.read(buffer, 0, chunkSize)
-                    when {
-                        readResult > 0 -> {
-                            val chunk = buffer.copyOf(readResult)
-                            val output = if (needsDownsampling) {
-                                downsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
-                            } else {
-                                chunk
-                            }
-                            send(output)
-                        }
+                val recorder = if (bluetoothConnected) {
+                    val bluetoothRecorder = runCatching { createBluetoothAudioRecord() }
+                        .onFailure { Timber.w(it, "Unable to create Bluetooth voice recorder") }
+                        .getOrNull()
+                    if (bluetoothRecorder?.state == AudioRecord.STATE_INITIALIZED) {
+                        bluetoothRecorder
+                    } else {
+                        bluetoothRecorder?.release()
+                        bluetoothAudioRouting?.stop()
+                        bluetoothConnected = false
+                        audioRecordFactory()
+                    }
+                } else {
+                    audioRecordFactory()
+                }
 
-                        readResult < 0 -> {
-                            Timber.e("AudioRecord read error: $readResult")
-                            break
+                if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                    recorder.release()
+                    Timber.e("AudioRecord failed to initialize")
+                    return@channelFlow
+                }
+
+                val actualSampleRate = recorder.sampleRate
+                val chunkSize = actualSampleRate * READ_CHUNK_DURATION_MS / 1000
+
+                if (actualSampleRate != VOICE_SAMPLE_RATE) {
+                    Timber.d("Recording at ${actualSampleRate}Hz, resampling to ${VOICE_SAMPLE_RATE}Hz")
+                }
+
+                try {
+                    recorder.startRecording()
+                    val buffer = ShortArray(chunkSize)
+
+                    while (isActive) {
+                        val readResult = recorder.read(buffer, 0, chunkSize)
+                        when {
+                            readResult > 0 -> {
+                                val chunk = buffer.copyOf(readResult)
+                                val output = when {
+                                    actualSampleRate > VOICE_SAMPLE_RATE ->
+                                        downsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
+                                    actualSampleRate < VOICE_SAMPLE_RATE ->
+                                        upsample(chunk, fromRate = actualSampleRate, toRate = VOICE_SAMPLE_RATE)
+                                    else -> chunk
+                                }
+                                send(output)
+                            }
+
+                            readResult < 0 -> {
+                                Timber.e("AudioRecord read error: $readResult")
+                                break
+                            }
                         }
                     }
+                } finally {
+                    try {
+                        if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                            recorder.stop()
+                        }
+                    } catch (e: IllegalStateException) {
+                        Timber.e(e, "Error stopping AudioRecord")
+                    }
+                    recorder.release()
                 }
             } finally {
-                try {
-                    recorder.stop()
-                } catch (e: IllegalStateException) {
-                    Timber.e(e, "Error stopping AudioRecord")
-                }
-                recorder.release()
+                if (bluetoothConnected) bluetoothAudioRouting?.stop()
             }
         }.flowOn(recorderDispatcher)
 
@@ -188,11 +213,22 @@ private fun createVoiceAudioRecord(): AudioRecord {
 }
 
 @SuppressLint("MissingPermission")
-private fun createAudioRecord(sampleRate: Int, chunkSize: Int): AudioRecord {
+private fun createBluetoothAudioRecord(): AudioRecord = createAudioRecord(
+    sampleRate = BLUETOOTH_SAMPLE_RATE,
+    chunkSize = BLUETOOTH_SAMPLE_RATE * READ_CHUNK_DURATION_MS / 1000,
+    audioSource = AudioSource.VOICE_COMMUNICATION,
+)
+
+@SuppressLint("MissingPermission")
+private fun createAudioRecord(
+    sampleRate: Int,
+    chunkSize: Int,
+    audioSource: Int = VOICE_AUDIO_SOURCE,
+): AudioRecord {
     val minBuffer = AudioRecord.getMinBufferSize(sampleRate, VOICE_CHANNEL_CONFIG, VOICE_AUDIO_FORMAT)
     val adjustedBufferSize = maxOf(minBuffer, chunkSize * 4)
     return AudioRecord(
-        VOICE_AUDIO_SOURCE,
+        audioSource,
         sampleRate,
         VOICE_CHANNEL_CONFIG,
         VOICE_AUDIO_FORMAT,
@@ -232,4 +268,21 @@ internal fun downsample(input: ShortArray, fromRate: Int, toRate: Int): ShortArr
     }
 
     return output
+}
+
+/** Upsamples Bluetooth SCO PCM audio to the 16 kHz sample rate required by Assist. */
+@VisibleForTesting
+internal fun upsample(input: ShortArray, fromRate: Int, toRate: Int): ShortArray {
+    require(fromRate > 0 && toRate > fromRate)
+    if (input.isEmpty()) return shortArrayOf()
+
+    val outputSize = (input.size.toLong() * toRate / fromRate).toInt()
+    val ratio = fromRate.toDouble() / toRate
+    return ShortArray(outputSize) { i ->
+        val sourcePosition = i * ratio
+        val index = sourcePosition.toInt().coerceAtMost(input.lastIndex)
+        val nextIndex = (index + 1).coerceAtMost(input.lastIndex)
+        val fraction = sourcePosition - index
+        (input[index] * (1.0 - fraction) + input[nextIndex] * fraction).toInt().toShort()
+    }
 }
