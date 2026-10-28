@@ -188,7 +188,6 @@ class VoiceAudioRecorder(
             recorder.release()
         }
     }
-
 }
 
 /**
